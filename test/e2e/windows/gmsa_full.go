@@ -32,6 +32,8 @@ limitations under the License.
 //  * the cluster comprises at least one Linux node that accepts workloads - it
 //    can be the master, but any other Linux node is fine too. This is needed for
 //    the webhook's pod.
+//  * in order to run "can read and write file to remote folder" test case, a folder (e.g. "write_test") need to be created 
+//    in that AD domain and it should be shared with that GMSA account.
 // All these assumptions are fulfilled by an AKS extension when setting up the AKS
 // cluster we run daily e2e tests against, but they do make running this test
 // outside of that very specific context pretty hard.
@@ -81,6 +83,12 @@ const (
 
 	// The name of the expected domain
 	gmsaDomain = "k8sgmsa.lan"
+
+	// The ip of the expected domain
+	gmsaDomainIP = "10.191.137.200"
+
+	// The shared folder on the expected domain for file-writing test
+	gmsaSharedFolder = "write_test"
 )
 
 var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
@@ -135,7 +143,7 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
 			bindRBACRoleToServiceAccount(f, serviceAccountName, rbacRoleName)
 
 			ginkgo.By("creating a pod using the GMSA cred spec")
-			podName := createPodWithGmsa(f, serviceAccountName)
+			podName := createPodWithGmsa(f, serviceAccountName, false)
 
 			// nltest /QUERY will only return successfully if there is a GMSA
 			// identity configured, _and_ it succeeds in contacting the AD controller
@@ -161,6 +169,68 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
 					return false
 				}
 				return true
+			}, 1*time.Minute, 1*time.Second).Should(gomega.BeTrue())
+		})
+
+		ginkgo.It("can read and write file to remote folder", func() {
+			defer ginkgo.GinkgoRecover()
+
+			ginkgo.By("finding the worker node that fulfills this test's assumptions")
+			nodes := findPreconfiguredGmsaNodes(f.ClientSet)
+			if len(nodes) != 1 {
+				e2eskipper.Skipf("Expected to find exactly one node with the %q label, found %d", gmsaFullNodeLabel, len(nodes))
+			}
+			node := nodes[0]
+
+			ginkgo.By("retrieving the contents of the GMSACredentialSpec custom resource manifest from the node")
+			crdManifestContents := retrieveCRDManifestFileContents(f, node)
+
+			ginkgo.By("downloading the GMSA webhook deploy script")
+			deployScriptPath, err := downloadFile(gmsaWebhookDeployScriptURL)
+			defer func() { os.Remove(deployScriptPath) }()
+			if err != nil {
+				framework.Failf(err.Error())
+			}
+
+			ginkgo.By("deploying the GMSA webhook")
+			webhookCleanUp, err := deployGmsaWebhook(f, deployScriptPath)
+			defer webhookCleanUp()
+			if err != nil {
+				framework.Failf(err.Error())
+			}
+
+			ginkgo.By("creating the GMSA custom resource")
+			customResourceCleanup, err := createGmsaCustomResource(f.Namespace.Name, crdManifestContents)
+			defer customResourceCleanup()
+			if err != nil {
+				framework.Failf(err.Error())
+			}
+
+			ginkgo.By("creating an RBAC role to grant use access to that GMSA resource")
+			rbacRoleName, rbacRoleCleanup, err := createRBACRoleForGmsa(f)
+			defer rbacRoleCleanup()
+			if err != nil {
+				framework.Failf(err.Error())
+			}
+
+			ginkgo.By("creating a service account")
+			serviceAccountName := createServiceAccount(f)
+
+			ginkgo.By("binding the RBAC role to the service account")
+			bindRBACRoleToServiceAccount(f, serviceAccountName, rbacRoleName)
+
+			ginkgo.By("creating a pod using the GMSA cred spec")
+			podName := createPodWithGmsa(f, serviceAccountName, true)
+			
+
+			ginkgo.By("checking that file can be written to the remote folder successfully")
+			gomega.Eventually(func() bool {
+				output, err := runKubectlExecInNamespace(f.Namespace.Name, podName, "powershell.exe", "--", "cat", "\\\\" + gmsaDomainIP + "\\" + gmsaSharedFolder + "\\write_test.txt")
+				if err != nil {
+					framework.Logf("unable to get file from AD server: %s", err)
+					return false
+				}
+				return strings.Contains(output, "This is a test file.")
 			}, 1*time.Minute, 1*time.Second).Should(gomega.BeTrue())
 		})
 	})
@@ -382,7 +452,7 @@ func bindRBACRoleToServiceAccount(f *framework.Framework, serviceAccountName, rb
 }
 
 // createPodWithGmsa creates a pod using the test GMSA cred spec, and returns its name.
-func createPodWithGmsa(f *framework.Framework, serviceAccountName string) string {
+func createPodWithGmsa(f *framework.Framework, serviceAccountName string, testFileWritting bool) string {
 	podName := "pod-with-gmsa"
 	credSpecName := gmsaCustomResourceName
 
@@ -411,8 +481,17 @@ func createPodWithGmsa(f *framework.Framework, serviceAccountName string) string
 			},
 		},
 	}
-	f.PodClient().CreateSync(pod)
 
+	if testFileWritting {
+		pod.Spec.Containers[0].Command = []string{
+			"powershell.exe",
+			"-Command",
+			"echo 'This is a test file.' > \\\\" + gmsaDomainIP + "\\" + gmsaSharedFolder + "\\write_test.txt; sleep -Seconds 600",
+		}
+	}
+
+	f.PodClient().CreateSync(pod)
+	
 	return podName
 }
 
