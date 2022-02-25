@@ -136,11 +136,18 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
 
 			ginkgo.By("creating a pod using the GMSA cred spec")
 			podName := createPodWithGmsa(f, serviceAccountName, true)
+			podName2 := createPodWithGmsa2(f, serviceAccountName, true)
+			podName3 := createPodWithGmsa3(f, serviceAccountName, true)
+			podName4 := createPodWithGmsa3(f, serviceAccountName, true)
 
 			
 			ginkgo.By("checking that file can be written into the volumes successfully")
 			gomega.Eventually(func() bool {
 				output, err := runKubectlExecInNamespace(f.Namespace.Name, podName, "powershell.exe", "-Command", "cd 'c:\\gmsa';$Dir = get-childitem 'c:\\gmsa' -recurse -force;$List = $Dir | where {$_.extension -eq '.txt'};$author=$List | Select-Object @{N='Owner';E={$_.GetAccessControl().Owner}};$author.Owner")
+				_, _ = runKubectlExecInNamespace(f.Namespace.Name, podName2, "powershell.exe", "-Command", "cd 'c:\\gmsa';$Dir = get-childitem 'c:\\gmsa' -recurse -force;$List = $Dir | where {$_.extension -eq '.txt'};$author=$List | Select-Object @{N='Owner';E={$_.GetAccessControl().Owner}};$author.Owner")
+				_, _ = runKubectlExecInNamespace(f.Namespace.Name, podName3, "powershell.exe", "-Command", "cd 'c:\\gmsa';$Dir = get-childitem 'c:\\gmsa' -recurse -force;$List = $Dir | where {$_.extension -eq '.txt'};$author=$List | Select-Object @{N='Owner';E={$_.GetAccessControl().Owner}};$author.Owner")
+				_, _ = runKubectlExecInNamespace(f.Namespace.Name, podName4, "powershell.exe", "-Command", "cd 'c:\\gmsa';$Dir = get-childitem 'c:\\gmsa' -recurse -force;$List = $Dir | where {$_.extension -eq '.txt'};$author=$List | Select-Object @{N='Owner';E={$_.GetAccessControl().Owner}};$author.Owner")
+
 				ginkgo.By("***** output **** : " + output)
 				if err != nil {
 					framework.Logf("unable to get file from local storage via exec: %s", err)
@@ -367,7 +374,7 @@ func bindRBACRoleToServiceAccount(f *framework.Framework, serviceAccountName, rb
 	f.ClientSet.RbacV1().RoleBindings(f.Namespace.Name).Create(context.TODO(), binding, metav1.CreateOptions{})
 }
 
-// createPodWithGmsa creates a pod using the test GMSA cred spec, and returns its name.
+// gmsa + node1(AD node)
 func createPodWithGmsa(f *framework.Framework, serviceAccountName string, volumePath bool) string {
 	podName := "pod-with-gmsa"
 	credSpecName := gmsaCustomResourceName
@@ -378,6 +385,7 @@ func createPodWithGmsa(f *framework.Framework, serviceAccountName string, volume
 			Namespace: f.Namespace.Name,
 		},
 		Spec: v1.PodSpec{
+			NodeSelector: map[string]string{"windowsnode": "1"},
 			ServiceAccountName: serviceAccountName,
 			Containers: []v1.Container{
 				{
@@ -405,7 +413,201 @@ func createPodWithGmsa(f *framework.Framework, serviceAccountName string, volume
 		pod.Spec.Containers[0].Command = []string{
 			"powershell.exe",
 			"-Command",
-			"echo \"The local volume is mounted!\" > " + dirPath + "\\write_test.txt; sleep -Seconds 600",
+			// "echo \"The local volume is mounted!\" > " + dirPath + "\\write_test.txt; sleep -Seconds 600",
+			"echo \"The local volume is mounted!\" > \\\\ADSERVER\\write_test\\write_test-1.txt; sleep -Seconds 600",
+			"-Credential",
+			"$cred",
+		}
+
+		pod.Spec.Containers[0].VolumeMounts = []v1.VolumeMount{
+			{
+				Name: "test-volume",
+				MountPath: dirPath,
+			},
+		}
+
+		pod.Spec.Volumes = []v1.Volume {
+			{
+				Name: "test-volume",
+				VolumeSource: v1.VolumeSource {
+					HostPath: &v1.HostPathVolumeSource {
+						Path: dirPath,
+					},
+				},
+			},
+		}
+	}
+
+	f.PodClient().CreateSync(pod)
+
+	return podName
+}
+
+// gmsa + node2(not AD node)
+func createPodWithGmsa2(f *framework.Framework, serviceAccountName string, volumePath bool) string {
+	podName := "pod-with-gmsa-2"
+	credSpecName := gmsaCustomResourceName
+
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      podName,
+			Namespace: f.Namespace.Name,
+		},
+		Spec: v1.PodSpec{
+			NodeSelector: map[string]string{"windowsnode": "2"},
+			ServiceAccountName: serviceAccountName,
+			Containers: []v1.Container{
+				{
+					Name:  podName,
+					Image: imageutils.GetE2EImage(imageutils.BusyBox),
+					Command: []string{
+						"powershell.exe",
+						"-Command",
+						"sleep -Seconds 600",
+					},
+				},
+			},
+			SecurityContext: &v1.PodSecurityContext{
+				WindowsOptions: &v1.WindowsSecurityContextOptions{
+					GMSACredentialSpecName: &credSpecName,
+				},
+			},
+		},
+	}
+
+	if volumePath {
+		splitPath := strings.Split(gmsaCrdManifestPath, `\`)
+		dirPath := strings.Join(splitPath[:len(splitPath)-1], `\`)
+
+		pod.Spec.Containers[0].Command = []string{
+			"powershell.exe",
+			"-Command",
+			// "echo \"The local volume is mounted!\" > " + dirPath + "\\write_test-2.txt; sleep -Seconds 600",
+			"echo \"The local volume is mounted!\" > \\\\ADSERVER\\write_test\\write_test-2.txt; sleep -Seconds 600",
+			"-Credential",
+			"$cred",
+		}
+
+		pod.Spec.Containers[0].VolumeMounts = []v1.VolumeMount{
+			{
+				Name: "test-volume",
+				MountPath: dirPath,
+			},
+		}
+
+		pod.Spec.Volumes = []v1.Volume {
+			{
+				Name: "test-volume",
+				VolumeSource: v1.VolumeSource {
+					HostPath: &v1.HostPathVolumeSource {
+						Path: dirPath,
+					},
+				},
+			},
+		}
+	}
+
+	f.PodClient().CreateSync(pod)
+
+	return podName
+}
+
+// no gmsa + node1(AD node)
+func createPodWithGmsa3(f *framework.Framework, serviceAccountName string, volumePath bool) string {
+	podName := "pod-with-gmsa-3"
+
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      podName,
+			Namespace: f.Namespace.Name,
+		},
+		Spec: v1.PodSpec{
+			NodeSelector: map[string]string{"windowsnode": "1"},
+			ServiceAccountName: serviceAccountName,
+			Containers: []v1.Container{
+				{
+					Name:  podName,
+					Image: imageutils.GetE2EImage(imageutils.BusyBox),
+					Command: []string{
+						"powershell.exe",
+						"-Command",
+						"sleep -Seconds 600",
+					},
+				},
+			},
+		},
+	}
+
+	if volumePath {
+		splitPath := strings.Split(gmsaCrdManifestPath, `\`)
+		dirPath := strings.Join(splitPath[:len(splitPath)-1], `\`)
+
+		pod.Spec.Containers[0].Command = []string{
+			"powershell.exe",
+			"-Command",
+			// "echo \"The local volume is mounted!\" > " + dirPath + "\\write_test-3.txt; sleep -Seconds 600",
+			"echo \"The local volume is mounted!\" > \\\\ADSERVER\\write_test\\write_test-3.txt; sleep -Seconds 600",
+		}
+
+		pod.Spec.Containers[0].VolumeMounts = []v1.VolumeMount{
+			{
+				Name: "test-volume",
+				MountPath: dirPath,
+			},
+		}
+
+		pod.Spec.Volumes = []v1.Volume {
+			{
+				Name: "test-volume",
+				VolumeSource: v1.VolumeSource {
+					HostPath: &v1.HostPathVolumeSource {
+						Path: dirPath,
+					},
+				},
+			},
+		}
+	}
+
+	f.PodClient().CreateSync(pod)
+
+	return podName
+}
+
+// no gmsa + node2(not AD node)
+func createPodWithGmsa4(f *framework.Framework, serviceAccountName string, volumePath bool) string {
+	podName := "pod-with-gmsa-4"
+
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      podName,
+			Namespace: f.Namespace.Name,
+		},
+		Spec: v1.PodSpec{
+			NodeSelector: map[string]string{"windowsnode": "2"},
+			ServiceAccountName: serviceAccountName,
+			Containers: []v1.Container{
+				{
+					Name:  podName,
+					Image: imageutils.GetE2EImage(imageutils.BusyBox),
+					Command: []string{
+						"powershell.exe",
+						"-Command",
+						"sleep -Seconds 600",
+					},
+				},
+			},
+		},
+	}
+
+	if volumePath {
+		splitPath := strings.Split(gmsaCrdManifestPath, `\`)
+		dirPath := strings.Join(splitPath[:len(splitPath)-1], `\`)
+
+		pod.Spec.Containers[0].Command = []string{
+			"powershell.exe",
+			"-Command",
+			// "echo \"The local volume is mounted!\" > " + dirPath + "\\write_test-4.txt; sleep -Seconds 600",
+			"echo \"The local volume is mounted!\" > \\\\ADSERVER\\write_test\\write_test-4.txt; sleep -Seconds 600",
 		}
 
 		pod.Spec.Containers[0].VolumeMounts = []v1.VolumeMount{
