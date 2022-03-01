@@ -140,7 +140,82 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
 			ginkgo.By("creating a pod using the GMSA cred spec")
 			podName := createPodWithGmsa(f, serviceAccountName, true)
 			
-			ginkgo.By("checking that file can be written into the volumes successfully")
+			ginkgo.By("checking that nltest /QUERY returns successfully")
+			var output string
+			gomega.Eventually(func() bool {
+				output, err = runKubectlExecInNamespace(f.Namespace.Name, podName, "nltest", "/QUERY")
+				if err != nil {
+					framework.Logf("unable to run command in container via exec: %s", err)
+					return false
+				}
+
+				if !isValidOutput(output) {
+					// try repairing the secure channel by running reset command
+					// https://kubernetes.io/docs/tasks/configure-pod-container/configure-gmsa/#troubleshooting
+					output, err = runKubectlExecInNamespace(f.Namespace.Name, podName, "nltest", fmt.Sprintf("/sc_reset:%s", gmsaDomain))
+					if err != nil {
+						framework.Logf("unable to run command in container via exec: %s", err)
+						return false
+					}
+					framework.Logf("failed to connect to domain; tried resetting the domain, output:\n%s", string(output))
+					return false
+				}
+				return true
+			}, 1*time.Minute, 1*time.Second).Should(gomega.BeTrue())
+		})
+
+		ginkgo.It("can write file to remote folder", func() {
+			defer ginkgo.GinkgoRecover()
+
+			ginkgo.By("finding the worker node that fulfills this test's assumptions")
+			nodes := findPreconfiguredGmsaNodes(f.ClientSet)
+			if len(nodes) != 1 {
+				e2eskipper.Skipf("Expected to find exactly one node with the %q label, found %d", gmsaFullNodeLabel, len(nodes))
+			}
+			node := nodes[0]
+
+			ginkgo.By("retrieving the contents of the GMSACredentialSpec custom resource manifest from the node")
+			crdManifestContents := retrieveCRDManifestFileContents(f, node)
+
+			ginkgo.By("downloading the GMSA webhook deploy script")
+			deployScriptPath, err := downloadFile(gmsaWebhookDeployScriptURL)
+			defer func() { os.Remove(deployScriptPath) }()
+			if err != nil {
+				framework.Failf(err.Error())
+			}
+
+			ginkgo.By("deploying the GMSA webhook")
+			webhookCleanUp, err := deployGmsaWebhook(f, deployScriptPath)
+			defer webhookCleanUp()
+			if err != nil {
+				framework.Failf(err.Error())
+			}
+
+			ginkgo.By("creating the GMSA custom resource")
+			customResourceCleanup, err := createGmsaCustomResource(f.Namespace.Name, crdManifestContents)
+			defer customResourceCleanup()
+			if err != nil {
+				framework.Failf(err.Error())
+			}
+
+			ginkgo.By("creating an RBAC role to grant use access to that GMSA resource")
+			rbacRoleName, rbacRoleCleanup, err := createRBACRoleForGmsa(f)
+			defer rbacRoleCleanup()
+			if err != nil {
+				framework.Failf(err.Error())
+			}
+
+			ginkgo.By("creating a service account")
+			serviceAccountName := createServiceAccount(f)
+
+			ginkgo.By("binding the RBAC role to the service account")
+			bindRBACRoleToServiceAccount(f, serviceAccountName, rbacRoleName)
+
+			ginkgo.By("creating a pod using the GMSA cred spec")
+			podName := createPodWithGmsa(f, serviceAccountName, true)
+			
+
+			ginkgo.By("checking that file can be written to the remote folder successfully")
 			gomega.Eventually(func() bool {
 				output, err := runKubectlExecInNamespace(f.Namespace.Name, podName, "powershell.exe", "--", "cat", "\\\\" + gmsaDomainIP + "\\write_test\\write_test.txt")
 				if err != nil {
