@@ -32,6 +32,8 @@ limitations under the License.
 //  * the cluster comprises at least one Linux node that accepts workloads - it
 //    can be the master, but any other Linux node is fine too. This is needed for
 //    the webhook's pod.
+//  * in order to run "can write file to remote folder" test case, a folder (e.g. "write_test") need to be created 
+//    in that AD domain and it should be shared with that GMSA account.
 // All these assumptions are fulfilled by an AKS extension when setting up the AKS
 // cluster we run daily e2e tests against, but they do make running this test
 // outside of that very specific context pretty hard.
@@ -84,6 +86,9 @@ const (
 
 	// The ip of the expected domain
 	gmsaDomainIP = "10.191.137.212"
+
+	// The shared folder on the expected domain for file-writing test
+	gmsaSharedFolder = "write_test"
 )
 
 var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
@@ -138,8 +143,11 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
 			bindRBACRoleToServiceAccount(f, serviceAccountName, rbacRoleName)
 
 			ginkgo.By("creating a pod using the GMSA cred spec")
-			podName := createPodWithGmsa(f, serviceAccountName, true)
-			
+			podName := createPodWithGmsa(f, serviceAccountName, false)
+
+			// nltest /QUERY will only return successfully if there is a GMSA
+			// identity configured, _and_ it succeeds in contacting the AD controller
+			// and authenticating with it.
 			ginkgo.By("checking that nltest /QUERY returns successfully")
 			var output string
 			gomega.Eventually(func() bool {
@@ -217,7 +225,7 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
 
 			ginkgo.By("checking that file can be written to the remote folder successfully")
 			gomega.Eventually(func() bool {
-				output, err := runKubectlExecInNamespace(f.Namespace.Name, podName, "powershell.exe", "--", "cat", "\\\\" + gmsaDomainIP + "\\write_test\\write_test.txt")
+				output, err := runKubectlExecInNamespace(f.Namespace.Name, podName, "powershell.exe", "--", "cat", "\\\\" + gmsaDomainIP + "\\" + gmsaSharedFolder + "\\write_test.txt")
 				if err != nil {
 					framework.Logf("unable to get file from AD server: %s", err)
 					return false
@@ -478,7 +486,7 @@ func createPodWithGmsa(f *framework.Framework, serviceAccountName string, testSt
 		pod.Spec.Containers[0].Command = []string{
 			"powershell.exe",
 			"-Command",
-			"echo 'This is a test file.' > \\\\" + gmsaDomainIP + "\\write_test\\write_test.txt; sleep -Seconds 600",
+			"echo 'This is a test file.' > \\\\" + gmsaDomainIP + "\\" + gmsaSharedFolder + "\\write_test.txt; sleep -Seconds 600",
 		}
 	}
 
