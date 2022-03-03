@@ -32,7 +32,7 @@ limitations under the License.
 //  * the cluster comprises at least one Linux node that accepts workloads - it
 //    can be the master, but any other Linux node is fine too. This is needed for
 //    the webhook's pod.
-//  * in order to run "can read and write file to remote folder" test case, a folder (e.g. "write_test") need to be created 
+//  * in order to run "can read and write file to remote folder" test case, a folder (e.g. "write_test") need to be created
 //    in that AD domain and it should be shared with that GMSA account.
 // All these assumptions are fulfilled by an AKS extension when setting up the AKS
 // cluster we run daily e2e tests against, but they do make running this test
@@ -46,6 +46,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"regexp"
 	"strings"
 	"time"
 
@@ -83,9 +84,6 @@ const (
 
 	// The name of the expected domain
 	gmsaDomain = "k8sgmsa.lan"
-
-	// The ip of the expected domain
-	gmsaDomainIP = "10.191.137.200"
 
 	// The shared folder on the expected domain for file-writing test
 	gmsaSharedFolder = "write_test"
@@ -143,7 +141,7 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
 			bindRBACRoleToServiceAccount(f, serviceAccountName, rbacRoleName)
 
 			ginkgo.By("creating a pod using the GMSA cred spec")
-			podName := createPodWithGmsa(f, serviceAccountName, false)
+			podName := createPodWithGmsa(f, serviceAccountName)
 
 			// nltest /QUERY will only return successfully if there is a GMSA
 			// identity configured, _and_ it succeeds in contacting the AD controller
@@ -220,12 +218,18 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
 			bindRBACRoleToServiceAccount(f, serviceAccountName, rbacRoleName)
 
 			ginkgo.By("creating a pod using the GMSA cred spec")
-			podName := createPodWithGmsa(f, serviceAccountName, true)
-			
+			podName := createPodWithGmsa(f, serviceAccountName)
+
+			ginkgo.By("getting the ip of GMSA domain")
+			gmsaDomainIP := getGmsaDomainIP(f, podName)
+
+			ginkgo.By("creating a pod using the GMSA cred spec")
+			filePath := "\\\\" + gmsaDomainIP + "\\" + gmsaSharedFolder + "\\write_test.txt"
+			_, _ = runKubectlExecInNamespace(f.Namespace.Name, podName, "--", "powershell.exe", "-Command", "echo 'This is a test file.' > "+filePath)
 
 			ginkgo.By("checking that file can be written to the remote folder successfully")
 			gomega.Eventually(func() bool {
-				output, err := runKubectlExecInNamespace(f.Namespace.Name, podName, "powershell.exe", "--", "cat", "\\\\" + gmsaDomainIP + "\\" + gmsaSharedFolder + "\\write_test.txt")
+				output, err := runKubectlExecInNamespace(f.Namespace.Name, podName, "powershell.exe", "--", "cat", filePath)
 				if err != nil {
 					framework.Logf("unable to get file from AD server: %s", err)
 					return false
@@ -452,7 +456,7 @@ func bindRBACRoleToServiceAccount(f *framework.Framework, serviceAccountName, rb
 }
 
 // createPodWithGmsa creates a pod using the test GMSA cred spec, and returns its name.
-func createPodWithGmsa(f *framework.Framework, serviceAccountName string, testFileWritting bool) string {
+func createPodWithGmsa(f *framework.Framework, serviceAccountName string) string {
 	podName := "pod-with-gmsa"
 	credSpecName := gmsaCustomResourceName
 
@@ -481,21 +485,25 @@ func createPodWithGmsa(f *framework.Framework, serviceAccountName string, testFi
 			},
 		},
 	}
-
-	if testFileWritting {
-		pod.Spec.Containers[0].Command = []string{
-			"powershell.exe",
-			"-Command",
-			"echo 'This is a test file.' > \\\\" + gmsaDomainIP + "\\" + gmsaSharedFolder + "\\write_test.txt; sleep -Seconds 600",
-		}
-	}
-
 	f.PodClient().CreateSync(pod)
-	
+
 	return podName
 }
 
 func runKubectlExecInNamespace(namespace string, args ...string) (string, error) {
 	namespaceOption := fmt.Sprintf("--namespace=%s", namespace)
 	return framework.RunKubectl(namespace, append([]string{"exec", namespaceOption}, args...)...)
+}
+
+func getGmsaDomainIP(f *framework.Framework, podName string) string {
+	output, _ := runKubectlExecInNamespace(f.Namespace.Name, podName, "powershell.exe", "--", "nslookup", gmsaDomain)
+	re := regexp.MustCompile(`(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)){3}`)
+	idx := strings.Index(output, gmsaDomain)
+
+	submatchall := re.FindAllString(output[idx:], -1)
+	if len(submatchall) < 1 {
+		framework.Logf("fail to get the ip of the gmsa domain")
+		return ""
+	}
+	return submatchall[0]
 }
