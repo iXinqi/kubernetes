@@ -32,7 +32,7 @@ limitations under the License.
 //  * the cluster comprises at least one Linux node that accepts workloads - it
 //    can be the master, but any other Linux node is fine too. This is needed for
 //    the webhook's pod.
-//  * in order to run "can read and write file to remote folder" test case, a folder (e.g. "write_test") need to be created 
+//  * in order to run "can read and write file to remote folder" test case, a folder (e.g. "write_test") need to be created
 //    in that AD domain and it should be shared with that GMSA account.
 // All these assumptions are fulfilled by an AKS extension when setting up the AKS
 // cluster we run daily e2e tests against, but they do make running this test
@@ -46,9 +46,9 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"regexp"
 	"strings"
 	"time"
-	"regexp"
 
 	v1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -218,23 +218,33 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
 			bindRBACRoleToServiceAccount(f, serviceAccountName, rbacRoleName)
 
 			ginkgo.By("creating a pod using the GMSA cred spec")
-			podName := createPodWithGmsa(f, serviceAccountName)	
+			podName := createPodWithGmsa(f, serviceAccountName)
 
-			ginkgo.By("getting the ip of GMSA domain")
-			gmsaDomainIP := getGmsaDomainIP(f, podName)
+			ginkgo.By("creating a pod not using the GMSA cred spec")
+			podWithoutgmsaName := createPodWithoutGmsa(f, serviceAccountName)
 
-			ginkgo.By("creating a pod using the GMSA cred spec")
-			filePath := "\\\\" + gmsaDomainIP + "\\" + gmsaSharedFolder + "\\write_test.txt"
-			_, _ = runKubectlExecInNamespace(f.Namespace.Name, podName, "--", "powershell.exe", "-Command", "echo 'This is a test file.' > " + filePath)	
+			ginkgo.By("writing files to local folder")
+			filePath1 := "c:\\local-storage-test\\write_test_with_gmsa.txt"
+			_, _ = runKubectlExecInNamespace(f.Namespace.Name, podName, "--", "powershell.exe", "-Command", "echo 'This is a test file.' > "+filePath1)
+			filePath2 := "c:\\local-storage-test\\write_test_without_gmsa.txt"
+			_, _ = runKubectlExecInNamespace(f.Namespace.Name, podWithoutgmsaName, "--", "powershell.exe", "-Command", "echo 'This is a test file.' > "+filePath2)
 
 			ginkgo.By("checking that file can be written to the remote folder successfully")
 			gomega.Eventually(func() bool {
-				output, err := runKubectlExecInNamespace(f.Namespace.Name, podName, "powershell.exe", "--", "cat", filePath)
+				output, err := runKubectlExecInNamespace(f.Namespace.Name, podName, "powershell.exe", "--", "cat", filePath1)
 				if err != nil {
 					framework.Logf("unable to get file from AD server: %s", err)
 					return false
 				}
-				return strings.Contains(output, "This is a test file.")
+				if !strings.Contains(output, "This is a test file.") {
+					return false
+				}
+				_, err = runKubectlExecInNamespace(f.Namespace.Name, podWithoutgmsaName, "powershell.exe", "--", "cat", filePath1)
+				if err == nil {
+					framework.Logf("the pod without gmsa should not be able to get file")
+					return false
+				}
+				return true
 			}, 1*time.Minute, 1*time.Second).Should(gomega.BeTrue())
 		})
 	})
@@ -459,6 +469,8 @@ func bindRBACRoleToServiceAccount(f *framework.Framework, serviceAccountName, rb
 func createPodWithGmsa(f *framework.Framework, serviceAccountName string) string {
 	podName := "pod-with-gmsa"
 	credSpecName := gmsaCustomResourceName
+	dirPath := "C:\\local-storage-test"
+	volumeName := "pod-with-gmsa-volume"
 
 	pod := &v1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -466,7 +478,7 @@ func createPodWithGmsa(f *framework.Framework, serviceAccountName string) string
 			Namespace: f.Namespace.Name,
 		},
 		Spec: v1.PodSpec{
-			NodeSelector: map[string]string{"windowsnode": "1"},
+			NodeSelector:       map[string]string{"windowsnode": "1"},
 			ServiceAccountName: serviceAccountName,
 			Containers: []v1.Container{
 				{
@@ -476,6 +488,22 @@ func createPodWithGmsa(f *framework.Framework, serviceAccountName string) string
 						"powershell.exe",
 						"-Command",
 						"sleep -Seconds 6000",
+					},
+					VolumeMounts: []v1.VolumeMount{
+						{
+							Name:      volumeName,
+							MountPath: dirPath,
+						},
+					},
+				},
+			},
+			Volumes: []v1.Volume{
+				{
+					Name: volumeName,
+					VolumeSource: v1.VolumeSource{
+						HostPath: &v1.HostPathVolumeSource{
+							Path: dirPath,
+						},
 					},
 				},
 			},
@@ -491,18 +519,72 @@ func createPodWithGmsa(f *framework.Framework, serviceAccountName string) string
 	return podName
 }
 
+// createPodWithoutGmsa creates a pod not using the test GMSA cred spec
+func createPodWithoutGmsa(f *framework.Framework, serviceAccountName string) string {
+	podName := "pod-without-gmsa"
+	dirPath := "C:\\local-storage-test"
+	volumeName := "pod-without-gmsa-volume"
+	username := "containeruser"
+
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      podName,
+			Namespace: f.Namespace.Name,
+		},
+		Spec: v1.PodSpec{
+			NodeSelector:       map[string]string{"windowsnode": "1"},
+			ServiceAccountName: serviceAccountName,
+			Containers: []v1.Container{
+				{
+					Name:  podName,
+					Image: imageutils.GetE2EImage(imageutils.BusyBox),
+					Command: []string{
+						"powershell.exe",
+						"-Command",
+						"sleep -Seconds 6000",
+					},
+					VolumeMounts: []v1.VolumeMount{
+						{
+							Name:      volumeName,
+							MountPath: dirPath,
+						},
+					},
+				},
+			},
+			Volumes: []v1.Volume{
+				{
+					Name: volumeName,
+					VolumeSource: v1.VolumeSource{
+						HostPath: &v1.HostPathVolumeSource{
+							Path: dirPath,
+						},
+					},
+				},
+			},
+			SecurityContext: &v1.PodSecurityContext{
+				WindowsOptions: &v1.WindowsSecurityContextOptions{
+					RunAsUserName: &username,
+				},
+			},
+		},
+	}
+	f.PodClient().CreateSync(pod)
+
+	return podName
+}
+
 func runKubectlExecInNamespace(namespace string, args ...string) (string, error) {
 	namespaceOption := fmt.Sprintf("--namespace=%s", namespace)
 	return framework.RunKubectl(namespace, append([]string{"exec", namespaceOption}, args...)...)
 }
 
-func getGmsaDomainIP (f *framework.Framework, podName string) string {
+func getGmsaDomainIP(f *framework.Framework, podName string) string {
 	output, _ := runKubectlExecInNamespace(f.Namespace.Name, podName, "powershell.exe", "--", "nslookup", gmsaDomain)
 	re := regexp.MustCompile(`(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)){3}`)
 	idx := strings.Index(output, gmsaDomain)
 
 	submatchall := re.FindAllString(output[idx:], -1)
-	if(len(submatchall) < 1) {
+	if len(submatchall) < 1 {
 		framework.Logf("fail to get the ip of the gmsa domain")
 		return ""
 	}
