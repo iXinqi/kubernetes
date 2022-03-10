@@ -170,7 +170,7 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
 			}, 1*time.Minute, 1*time.Second).Should(gomega.BeTrue())
 		})
 
-		ginkgo.It("can read and write file to remote folder", func() {
+		ginkgo.It("can read and write file to remote SMB folder", func() {
 			defer ginkgo.GinkgoRecover()
 
 			ginkgo.By("finding the worker node that fulfills this test's assumptions")
@@ -223,12 +223,11 @@ var _ = SIGDescribe("[Feature:Windows] GMSA Full [Serial] [Slow]", func() {
 			ginkgo.By("getting the ip of GMSA domain")
 			gmsaDomainIP := getGmsaDomainIP(f, podName)
 
-			ginkgo.By("creating a pod using the GMSA cred spec")
-			filePath := "\\\\" + gmsaDomainIP + "\\" + gmsaSharedFolder + "\\write_test.txt"
-			_, _ = runKubectlExecInNamespace(f.Namespace.Name, podName, "--", "powershell.exe", "-Command", "echo 'This is a test file.' > "+filePath)
-
-			ginkgo.By("checking that file can be written to the remote folder successfully")
+			ginkgo.By("checking that file can be read and write from the remote folder successfully")
 			gomega.Eventually(func() bool {
+				// The filePath is a remote folder, do not change the format of it
+				filePath := "\\\\" + gmsaDomainIP + "\\" + gmsaSharedFolder + "\\write_test.txt"
+				_, _ = runKubectlExecInNamespace(f.Namespace.Name, podName, "--", "powershell.exe", "-Command", "echo 'This is a test file.' > "+filePath)
 				output, err := runKubectlExecInNamespace(f.Namespace.Name, podName, "powershell.exe", "--", "cat", filePath)
 				if err != nil {
 					framework.Logf("unable to get file from AD server: %s", err)
