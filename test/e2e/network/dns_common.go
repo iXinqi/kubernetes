@@ -482,8 +482,7 @@ func assertFilesContain(fileNames []string, fileDir string, pod *v1.Pod, client 
 		if len(failed) == 0 {
 			return true, nil
 		}
-		framework.Logf("Lookups using %s/%s failed for: %v\n", pod.Namespace, pod.Name, failed)
-		return false, nil
+		return false, fmt.Errorf("Lookups using %s/%s failed for: %v", pod.Namespace, pod.Name, failed) 
 	}))
 	framework.ExpectEqual(len(failed), 0)
 }
